@@ -77,8 +77,8 @@ All interfaces are Python dataclasses (or TypedDicts) shared across modules to a
 - Provide optional temperature tuning and max token controls through static configuration.
 
 ## 8. Configuration and Secrets
-- Environment variables or immutable config file for API keys, allowed symbols, leverage caps, funding thresholds, OpenAI model ID, loop cadence, network selection (mainnet/testnet/local), and `uv` environment pinning (Python 3.14t).
-- Secrets loaded once at bootstrap; no hot reloading.  
+- All runtime inputs (credentials, symbols, risk limits, runtime mode, telemetry paths) are sourced from an immutable TOML file (default `wonttrade.toml`). The daemon rejects missing or malformed fields rather than falling back to environment variables.
+- Secrets load once at bootstrap; no hot reloading.  
 - Optionally support configuration hashing to detect accidental edits at startup.
 - Ruff enforces lint/format during CI and local development; integrate with task runners invoked through `uv`.
 
@@ -98,3 +98,11 @@ All interfaces are Python dataclasses (or TypedDicts) shared across modules to a
 - Introduce automated scenario testing that replays historical `MarketSnapshot` data through the same loop.  
 - Add optional human-in-the-loop approval mode without breaking the zero-interaction baseline.  
 - Support multiple concurrent LLM models with weighted blending once validated by guardrails.
+
+## 12. Backtesting Support
+- Reuse the production event loop with a configurable `RuntimeMode` flag (`LIVE`, `TESTNET`, `BACKTEST`) so guardrails, reconciliation, and telemetry behave identically across modes.
+- Provide a `BacktestReplayProvider` that streams historical market candles, funding, and open-interest data into `MarketSnapshot` objects, computing required indicators on the fly to match the real-time feature set.
+- Replace live execution with a `SimulatedExecutor` that consumes `ExecutionPlan` actions, applies configurable slippage and fee models, maintains virtual balances, and emits `AccountSnapshot` updates for the next loop iteration.
+- Always invoke the OpenAI LLM in real time during backtests; caching is forbidden. Each prompt/response pair must be logged with timestamps, model ID, and checksum for auditing and reproducibility.
+- Enforce the same guardrails and configuration limits as live trading. Failures should be recorded, halt order simulation for that step, and preserve the prior virtual position state.
+- Emit dedicated artifacts at the end of a backtest (equity curve, drawdown series, guardrail hit counts, latency metrics) while keeping per-iteration traces in `backtest-results.ndjson` for downstream analytics.
