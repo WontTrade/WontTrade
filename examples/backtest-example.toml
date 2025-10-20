@@ -1,0 +1,56 @@
+# Example configuration for running WontTrade in backtest mode.
+
+[credentials]
+# Replace with valid API keys before running.
+openai_api_key = "sk-your-openai-key"
+# For Azure OpenAI deployments, supply azure_openai_api_key instead of openai_api_key.
+# azure_openai_api_key = "azure-openai-key"
+hyperliquid_private_key = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# Optional explicit account address; omit to derive from the private key.
+# account_address = "0x0000000000000000000000000000000000000000"
+
+[runtime]
+mode = "backtest"
+loop_interval_seconds = 0.0
+
+[hyperliquid]
+# Select "mainnet" or "testnet"; base_url overrides are rarely needed.
+network = "mainnet"
+# base_url = "https://api.hyperliquid.xyz"
+
+[symbols]
+tracked = ["BTC", "ETH"]
+
+[llm]
+provider = "openai"
+model = "gpt-4.1"
+temperature = 0.1
+max_output_tokens = 1000
+request_timeout_seconds = 30.0
+retry_attempts = 3
+# Azure OpenAI example:
+# provider = "azure"
+# [llm.azure]
+# endpoint = "https://your-azure-openai-resource.openai.azure.com"
+# deployment = "wonttrade-deployment"
+# api_version = "2024-05-01-preview"
+
+[risk]
+max_leverage = 10.0
+max_notional_per_symbol = 50000.0
+funding_rate_limit = 0.0005
+cash_buffer_usd = 1000.0
+
+[telemetry]
+decision_log_path = "artifacts/backtest-decisions.ndjson"
+heartbeat_path = "artifacts/backtest-heartbeat.json"
+
+[backtest]
+# ISO 8601 timestamps (UTC by default). Adjust windows as needed.
+start_time = "2025-09-01T00:00:00+00:00"
+end_time = "2025-09-03T00:00:00+00:00"
+results_path = "artifacts/backtest-results.ndjson"
+initial_cash = 10000.0
+fee_bps = 1.0
+slippage_bps = 0.5
+max_steps = 480

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from hyperliquid.info import Info
+
 from wonttrade.backtest.replay import BacktestReplayProvider
 from wonttrade.backtest.simulation import SimulatedExchange, SimulatedExecutor
 from wonttrade.config import AppConfig, RuntimeMode
@@ -57,9 +59,11 @@ def main() -> None:
             slippage_bps=config.backtest.slippage_bps,
             results_path=config.backtest.results_path,
         )
+        info_client = Info(base_url=config.hyperliquid_base_url, skip_ws=True)
         state_loader = BacktestReplayProvider(
             config=config,
             simulation=simulation,
+            info_client=info_client,
         )
         executor = SimulatedExecutor(simulation=simulation)
         loop = TradingLoop(
