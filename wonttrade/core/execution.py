@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hyperliquid.exchange import Exchange
 
-from ..models import ActionType, ExecutionAction, ExecutionPlan
+from ..models import ActionType, ExecutionAction, ExecutionPlan, FillRecord, MarketSnapshot
 from ..telemetry.logger import get_logger
 
 
@@ -24,6 +24,7 @@ class ExecutionReport:
 
     attempted: int
     errors: list[ExecutionError]
+    fills: list[FillRecord] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -37,10 +38,10 @@ class ExecutionService:
         self._exchange = exchange
         self._log = get_logger(__name__)
 
-    def execute(self, plan: ExecutionPlan) -> ExecutionReport:
+    def execute(self, plan: ExecutionPlan, market: MarketSnapshot | None = None) -> ExecutionReport:
         if plan.is_noop():
             self._log.info("No execution required; plan is empty.")
-            return ExecutionReport(attempted=0, errors=[])
+            return ExecutionReport(attempted=0, errors=[], fills=[])
 
         errors: list[ExecutionError] = []
         for action in plan.actions:
@@ -49,7 +50,7 @@ class ExecutionService:
             except Exception as exc:  # pragma: no cover - surface runtime issues
                 self._log.error("Execution failed for %s: %s", action.symbol, exc)
                 errors.append(ExecutionError(symbol=action.symbol, message=str(exc)))
-        return ExecutionReport(attempted=len(plan.actions), errors=errors)
+        return ExecutionReport(attempted=len(plan.actions), errors=errors, fills=[])
 
     def _dispatch_stub(self, action: ExecutionAction) -> None:
         """Placeholder dispatcher until full execution logic is implemented."""

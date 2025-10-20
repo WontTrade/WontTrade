@@ -15,6 +15,7 @@ class PositionSide(str, Enum):
     SHORT = "short"
 
 
+@dataclass(slots=True)
 class Candle:
     """Single OHLCV entry."""
 
@@ -162,3 +163,16 @@ class ExecutionPlan:
     def is_noop(self) -> bool:
         """Return True when no actions are required."""
         return not self.actions
+
+
+@dataclass(slots=True)
+class FillRecord:
+    """Represents a simulated trade fill."""
+
+    symbol: str
+    action: ActionType
+    quantity: float
+    price: float
+    fee: float
+    pnl: float
+    reason: str | None = None

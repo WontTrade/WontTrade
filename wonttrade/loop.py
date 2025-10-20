@@ -40,6 +40,9 @@ class TradingLoop:
             while True:
                 try:
                     self._run_once()
+                except StopIteration:
+                    self._log.info("State loader exhaustion detected; stopping loop.")
+                    break
                 except Exception as exc:  # pragma: no cover - production resilience
                     self._log.exception("Iteration failed: %s", exc)
                     self.audit_sink.write_heartbeat(
@@ -53,14 +56,43 @@ class TradingLoop:
         finally:
             self.state_loader.close()
 
+    def run_backtest(self) -> None:
+        try:
+            while True:
+                try:
+                    self._run_once()
+                except StopIteration:
+                    self._log.info("Backtest completed after %s iterations.", self._invocation)
+                    uptime_delta = datetime.now(tz=UTC) - self._start_time
+                    self.audit_sink.write_heartbeat(
+                        "completed",
+                        details={
+                            "invocation": self._invocation,
+                            "uptime_minutes": uptime_delta.total_seconds() / 60,
+                        },
+                    )
+                    break
+                except Exception as exc:  # pragma: no cover - resilience
+                    self._log.exception("Backtest iteration failed: %s", exc)
+                    self.audit_sink.write_heartbeat(
+                        "error",
+                        details={
+                            "invocation": self._invocation,
+                            "reason": f"iteration_error: {exc}",
+                        },
+                    )
+        finally:
+            self.state_loader.close()
+
     def _run_once(self) -> None:
-        self._invocation += 1
+        next_invocation = self._invocation + 1
         uptime_minutes = (datetime.now(tz=UTC) - self._start_time).total_seconds() / 60
         bundle = self.state_loader.load(
-            invocation=self._invocation,
+            invocation=next_invocation,
             uptime_minutes=uptime_minutes,
             sharpe_ratio=self._sharpe_ratio,
         )
+        self._invocation = next_invocation
         targets = self._generate_targets(bundle)
         guard_report = self.guardrails.validate(bundle.market, bundle.account, targets)
         if not guard_report.approved:
@@ -78,13 +110,25 @@ class TradingLoop:
             }
         )
 
-        execution_report = self.executor.execute(reconciliation.plan)
+        execution_report = self.executor.execute(reconciliation.plan, bundle.market)
         self.audit_sink.record_execution(
             {
                 "type": "execution",
                 "invocation": self._invocation,
                 "attempted": execution_report.attempted,
                 "success": execution_report.success,
+                "fills": [
+                    {
+                        "symbol": fill.symbol,
+                        "action": fill.action.value,
+                        "quantity": fill.quantity,
+                        "price": fill.price,
+                        "fee": fill.fee,
+                        "pnl": fill.pnl,
+                        "reason": fill.reason,
+                    }
+                    for fill in execution_report.fills
+                ],
                 "errors": [error.__dict__ for error in execution_report.errors],
             }
         )
