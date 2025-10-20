@@ -4,26 +4,24 @@ Autonomous trading daemon that ingests Hyperliquid market data, prompts a large 
 
 ## Prerequisites
 
-- `uv` package manager with access to Python `3.14t`.
-- Hyperliquid credentials (private key and optional explicit account address).
-- OpenAI API key with access to the configured model.
+- `uv` with a Python `3.14t` toolchain (e.g. `uv python install 3.14t`).
+- Hyperliquid credentials (private key and optional explicit account address) for mainnet or testnet.
+- API access to either OpenAI or Azure OpenAI for decision generation.
 
-## Environment Variables
+## Configuration
 
-| Variable | Description |
-| --- | --- |
-| `HYPERLIQUID_PRIVATE_KEY` | Hex-encoded private key used to sign orders. |
-| `HYPERLIQUID_ACCOUNT_ADDRESS` | Optional; defaults to the wallet address derived from the private key. |
-| `HYPERLIQUID_NETWORK` | `mainnet` (default), `testnet`, or `local`; selects the target cluster. |
-| `HYPERLIQUID_API_BASE_URL` | Optional explicit API endpoint; overrides the network selection. |
-| `OPENAI_API_KEY` | OpenAI credential for the decision engine. |
-| `REASONTRADE_SYMBOLS` | Comma-separated list of symbols (default `BTC,ETH`). |
-| `REASONTRADE_LOOP_INTERVAL` | Seconds between loop iterations (default `15`). |
-| `REASONTRADE_LLM_MODEL` | OpenAI model name (default `gpt-4.1`). |
-| `REASONTRADE_MAX_LEVERAGE` | Maximum aggregate leverage multiple. |
-| `REASONTRADE_MAX_NOTIONAL_PER_SYMBOL` | Per-symbol notional cap in USD. |
-| `REASONTRADE_CASH_BUFFER_USD` | Minimum reserve cash to maintain. |
-| `REASONTRADE_FUNDING_LIMIT` | Absolute funding rate limit before scaling into bigger positions. |
+WontTrade is configured exclusively through a TOML file (defaults to `wonttrade.toml`). The configuration contains:
+
+- `[credentials]` – Hyperliquid signing key, optional account address, and the LLM API keys.
+- `[runtime]` – Trading mode (`live` or `backtest`) and loop cadence.
+- `[hyperliquid]` – Target network (`mainnet`, `testnet`, `local`) and optional base URL override.
+- `[symbols]` – Asset universe tracked by the trading loop.
+- `[llm]` – Model selection plus OpenAI or Azure-specific settings (`[llm.azure]`).
+- `[risk]` – Leverage, notional, and funding guardrails.
+- `[telemetry]` – Paths for decision logs and heartbeat output.
+- `[backtest]` – Window, cash, and execution parameters for historical simulations.
+
+Copy `examples/backtest-example.toml` and adjust the values to suit your deployment. The loader will automatically export the supplied API keys so the respective SDKs can authenticate.
 
 ## Installation
 
@@ -31,15 +29,23 @@ Autonomous trading daemon that ingests Hyperliquid market data, prompts a large 
 uv sync
 ```
 
-This command resolves dependencies for the default environment and the `dev` group.
+## Running
 
-## Running the Daemon
+### Live Trading
 
 ```bash
-uv run python main.py
+uv run python main.py --config wonttrade.toml
 ```
 
-Logs, decision records (`decision-log.ndjson`), and heartbeat (`heartbeat.json`) are written in the project root by default and can be overridden via environment variables.
+The loop connects to Hyperliquid using the official SDK, requests decisions from the configured LLM provider, enforces guardrails, and reconciles target positions.
+
+### Backtesting
+
+```bash
+uv run python main.py --config examples/backtest-example.toml
+```
+
+Backtests stream historical candles and funding data directly from Hyperliquid, replay order book states through the simulator, and still invoke the live LLM provider for each decision tick.
 
 ## Linting and Formatting
 
@@ -50,10 +56,12 @@ uv run ruff format
 
 ## Project Structure
 
-- `wonttrade/config.py` – Environment-backed configuration models.
-- `wonttrade/core/` – State loading, indicator enrichment, guardrails, reconciliation, and execution stubs.
-- `wonttrade/llm/decision_engine.py` – Prompting and parsing of the OpenAI decision engine.
-- `wonttrade/hyperliquid_client.py` – Hyperliquid client factory for info/exchange access.
+- `wonttrade/config.py` – TOML-backed configuration models.
+- `wonttrade/loop.py` – Core orchestration for live and backtest loops.
+- `wonttrade/core/` – Guardrails, reconciliation, execution, and state utilities.
+- `wonttrade/backtest/` – Historical data fetch, replay, and simulation plumbing.
+- `wonttrade/llm/decision_engine.py` – Prompt construction and response parsing for OpenAI/Azure.
+- `wonttrade/hyperliquid_client.py` – Factory for live Hyperliquid Info and Exchange clients.
 - `wonttrade/context.py` – Prompt context rendering.
-- `wonttrade/telemetry/` – Logging and audit utilities.
+- `wonttrade/telemetry/` – Logging and audit sinks.
 - `SPEC.md` – High-level system specification.
