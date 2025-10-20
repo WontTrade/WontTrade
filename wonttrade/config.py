@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final
@@ -43,15 +44,34 @@ class RiskLimits:
     cash_buffer_usd: float = 1_000.0
 
 
+class LLMProvider(str, Enum):
+    """Supported LLM providers."""
+
+    OPENAI = "openai"
+    AZURE_OPENAI = "azure"
+
+
+@dataclass(slots=True)
+class AzureOpenAISettings:
+    """Azure OpenAI specific configuration."""
+
+    endpoint: str
+    deployment: str
+    api_version: str
+
+
 @dataclass(slots=True)
 class LLMSettings:
     """Settings for the LLM decision engine."""
 
+    provider: LLMProvider = LLMProvider.OPENAI
     model: str = "gpt-4.1"
     temperature: float = 0.1
     max_output_tokens: int = 1_000
     request_timeout_seconds: float = 30.0
     retry_attempts: int = 3
+    api_key: str | None = None
+    azure: AzureOpenAISettings | None = None
 
 
 @dataclass(slots=True)
@@ -66,7 +86,8 @@ class TelemetrySettings:
 class BacktestSettings:
     """Configuration controlling backtest execution."""
 
-    dataset_path: Path
+    start_time: datetime
+    end_time: datetime
     results_path: Path = Path("backtest-results.ndjson")
     initial_cash: float = 10_000.0
     fee_bps: float = 1.0
@@ -103,7 +124,8 @@ class AppConfig:
 
         base_dir = config_path.parent
         credentials = _expect_table(raw, "credentials")
-        openai_key = _expect_string(credentials, "openai_api_key")
+        openai_key = _optional_string(credentials, "openai_api_key")
+        azure_key = _optional_string(credentials, "azure_openai_api_key")
         hyper_private_key = _optional_string(credentials, "hyperliquid_private_key")
         account_address_raw = _optional_string(credentials, "account_address")
 
@@ -144,16 +166,54 @@ class AppConfig:
         )
 
         llm_section = _expect_table(raw, "llm", optional=True)
+        provider_value = _optional_string(
+            llm_section,
+            "provider",
+            default=LLMProvider.OPENAI.value,
+        )
+        provider = _parse_enum(LLMProvider, provider_value, "llm.provider")
+        model_value = _optional_string(llm_section, "model", default="gpt-4.1")
+        temperature_value = float(llm_section.get("temperature", 0.1) if llm_section else 0.1)
+        max_output_tokens_value = int(
+            llm_section.get("max_output_tokens", 1_000) if llm_section else 1_000
+        )
+        timeout_value = float(
+            llm_section.get("request_timeout_seconds", 30.0) if llm_section else 30.0
+        )
+        retry_attempts_value = int(llm_section.get("retry_attempts", 3) if llm_section else 3)
+
+        api_key = None
+        azure_settings: AzureOpenAISettings | None = None
+        if provider is LLMProvider.OPENAI:
+            if not openai_key:
+                raise ValueError("credentials.openai_api_key is required for OpenAI provider.")
+            api_key = openai_key
+            os.environ.setdefault("OPENAI_API_KEY", openai_key)
+        elif provider is LLMProvider.AZURE_OPENAI:
+            if not azure_key:
+                raise ValueError("credentials.azure_openai_api_key is required for Azure provider.")
+            if llm_section is None:
+                raise ValueError("llm.azure configuration is required for Azure provider.")
+            azure_section = _expect_table(llm_section, "azure")
+            azure_settings = AzureOpenAISettings(
+                endpoint=_expect_string(azure_section, "endpoint"),
+                deployment=_expect_string(azure_section, "deployment"),
+                api_version=_expect_string(azure_section, "api_version"),
+            )
+            api_key = azure_key
+            os.environ.setdefault("AZURE_OPENAI_API_KEY", azure_key)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+
         llm_settings = LLMSettings(
-            model=_optional_string(llm_section, "model", default="gpt-4.1"),
-            temperature=float(llm_section.get("temperature", 0.1) if llm_section else 0.1),
-            max_output_tokens=int(
-                llm_section.get("max_output_tokens", 1_000) if llm_section else 1_000
-            ),
-            request_timeout_seconds=float(
-                llm_section.get("request_timeout_seconds", 30.0) if llm_section else 30.0
-            ),
-            retry_attempts=int(llm_section.get("retry_attempts", 3) if llm_section else 3),
+            provider=provider,
+            model=model_value or "",
+            temperature=temperature_value,
+            max_output_tokens=max_output_tokens_value,
+            request_timeout_seconds=timeout_value,
+            retry_attempts=retry_attempts_value,
+            api_key=api_key,
+            azure=azure_settings,
         )
 
         risk_section = _expect_table(raw, "risk", optional=True)
@@ -184,9 +244,6 @@ class AppConfig:
             ),
         )
 
-        # Store OpenAI key in environment for SDK consumption.
-        os.environ.setdefault("OPENAI_API_KEY", openai_key)
-
         if runtime_mode is RuntimeMode.LIVE:
             if not hyper_private_key:
                 raise ValueError("Live runtime requires credentials.hyperliquid_private_key.")
@@ -203,9 +260,15 @@ class AppConfig:
         if runtime_mode is RuntimeMode.BACKTEST:
             if backtest_section is None:
                 raise ValueError("backtest configuration section is required for backtest runtime.")
-            dataset_path_raw = _expect_string(backtest_section, "dataset_path")
+            start_raw = _expect_string(backtest_section, "start_time")
+            end_raw = _expect_string(backtest_section, "end_time")
+            start_time = _parse_datetime(start_raw)
+            end_time = _parse_datetime(end_raw)
+            if end_time <= start_time:
+                raise ValueError("backtest.end_time must be greater than backtest.start_time.")
             backtest_settings = BacktestSettings(
-                dataset_path=_resolve_required_path(base_dir, dataset_path_raw),
+                start_time=start_time,
+                end_time=end_time,
                 results_path=_resolve_path(
                     base_dir,
                     backtest_section.get("results_path"),
@@ -216,10 +279,18 @@ class AppConfig:
                 slippage_bps=float(backtest_section.get("slippage_bps", 0.5)),
                 max_steps=_optional_int(backtest_section, "max_steps"),
             )
-        elif backtest_section is not None and "dataset_path" in backtest_section:
-            dataset_path_raw = _expect_string(backtest_section, "dataset_path")
+        elif (
+            backtest_section is not None
+            and "start_time" in backtest_section
+            and "end_time" in backtest_section
+        ):
+            start_time = _parse_datetime(_expect_string(backtest_section, "start_time"))
+            end_time = _parse_datetime(_expect_string(backtest_section, "end_time"))
+            if end_time <= start_time:
+                raise ValueError("backtest.end_time must be greater than backtest.start_time.")
             backtest_settings = BacktestSettings(
-                dataset_path=_resolve_required_path(base_dir, dataset_path_raw),
+                start_time=start_time,
+                end_time=end_time,
                 results_path=_resolve_path(
                     base_dir,
                     backtest_section.get("results_path"),
@@ -316,13 +387,6 @@ def _resolve_path(base: Path, raw: str | None, default: str) -> Path:
     return target
 
 
-def _resolve_required_path(base: Path, raw: str) -> Path:
-    target = Path(raw)
-    if not target.is_absolute():
-        target = (base / target).resolve()
-    return target
-
-
 def _optional_int(payload: dict[str, Any], key: str) -> int | None:
     value = payload.get(key)
     if value is None:
@@ -332,3 +396,13 @@ def _optional_int(payload: dict[str, Any], key: str) -> int | None:
     if isinstance(value, str) and value.strip():
         return int(value)
     raise ValueError(f"Configuration key '{key}' must be an integer when provided.")
+
+
+def _parse_datetime(raw: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid datetime format: '{raw}'. Expected ISO 8601.") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

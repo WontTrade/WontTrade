@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from openai import OpenAI
+from openai import AzureOpenAI, OpenAI
 from pydantic import BaseModel, ValidationError
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from ..config import AppConfig
+from ..config import AppConfig, LLMProvider
 from ..context import LLMContextBuilder
 from ..models import AccountSnapshot, MarketSnapshot, TargetPosition
 from ..telemetry.logger import get_logger
@@ -51,7 +51,19 @@ class LLMDecisionEngine:
     context_builder: LLMContextBuilder
 
     def __post_init__(self) -> None:
-        self._client = OpenAI()
+        if self.config.llm.provider is LLMProvider.OPENAI:
+            self._client = OpenAI(api_key=self.config.llm.api_key)
+        elif self.config.llm.provider is LLMProvider.AZURE_OPENAI:
+            azure = self.config.llm.azure
+            if azure is None:
+                raise ValueError("Azure OpenAI configuration is missing.")
+            self._client = AzureOpenAI(
+                api_key=self.config.llm.api_key,
+                api_version=azure.api_version,
+                azure_endpoint=azure.endpoint,
+            )
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.config.llm.provider}")
         self._log = get_logger(__name__)
 
     def generate_targets(
@@ -71,8 +83,13 @@ class LLMDecisionEngine:
 
         for attempt in retryer:
             with attempt:
+                model_name = (
+                    self.config.llm.model
+                    if self.config.llm.provider is LLMProvider.OPENAI
+                    else self._azure_deployment()
+                )
                 response = self._client.responses.create(
-                    model=self.config.llm.model,
+                    model=model_name,
                     input=[
                         {"role": "system", "content": [{"type": "text", "text": _SYSTEM_PROMPT}]},
                         {"role": "user", "content": [{"type": "text", "text": prompt}]},
@@ -92,6 +109,12 @@ class LLMDecisionEngine:
                 self._log.debug("LLM raw output: %s", raw)
                 return raw
         raise RuntimeError("LLM retry loop exited without returning output")
+
+    def _azure_deployment(self) -> str:
+        azure = self.config.llm.azure
+        if azure is None:
+            raise ValueError("Azure deployment configuration missing.")
+        return azure.deployment
 
     def _parse_targets(self, raw_text: str) -> list[TargetPosition]:
         try:

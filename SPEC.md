@@ -71,13 +71,14 @@ All interfaces are Python dataclasses (or TypedDicts) shared across modules to a
 - **Graceful Failure**: When guardrails trigger, signal the anomaly, skip execution, and do not close positions automatically.
 
 ## 7. LLM Integration
-- Use OpenAI Python SDK with function-calling or JSON schema guidance to guarantee structured output.  
+- Support both OpenAI and Azure OpenAI providers through the official Python SDKs; provider selection, credentials, and deployment metadata are defined in `wonttrade.toml`.  
 - Maintain versioned prompt templates stored on disk; the loop reads but never mutates them.  
 - Log raw prompt and response for replay while redacting secrets.  
 - Provide optional temperature tuning and max token controls through static configuration.
 
 ## 8. Configuration and Secrets
-- All runtime inputs (credentials, symbols, risk limits, runtime mode, telemetry paths) are sourced from an immutable TOML file (default `wonttrade.toml`). The daemon rejects missing or malformed fields rather than falling back to environment variables.
+- All runtime inputs (credentials, symbols, risk limits, runtime mode, telemetry paths) are sourced from an immutable TOML file (default `wonttrade.toml`). The daemon rejects missing or malformed fields rather than falling back to environment variables.  
+- LLM credentials support OpenAI (`credentials.openai_api_key`) or Azure OpenAI (`credentials.azure_openai_api_key`) along with provider metadata (`llm.provider`, optional `[llm.azure]` table).
 - Secrets load once at bootstrap; no hot reloading.  
 - Optionally support configuration hashing to detect accidental edits at startup.
 - Ruff enforces lint/format during CI and local development; integrate with task runners invoked through `uv`.
@@ -101,7 +102,7 @@ All interfaces are Python dataclasses (or TypedDicts) shared across modules to a
 
 ## 12. Backtesting Support
 - Reuse the production event loop with a configurable `RuntimeMode` flag (`LIVE`, `TESTNET`, `BACKTEST`) so guardrails, reconciliation, and telemetry behave identically across modes.
-- Provide a `BacktestReplayProvider` that streams historical market candles, funding, and open-interest data into `MarketSnapshot` objects, computing required indicators on the fly to match the real-time feature set.
+- Provide a `BacktestReplayProvider` that streams Hyperliquid historical candles and funding (via the Info API) into `MarketSnapshot` objects, computing required indicators on the fly to match the real-time feature set.
 - Replace live execution with a `SimulatedExecutor` that consumes `ExecutionPlan` actions, applies configurable slippage and fee models, maintains virtual balances, and emits `AccountSnapshot` updates for the next loop iteration.
 - Always invoke the OpenAI LLM in real time during backtests; caching is forbidden. Each prompt/response pair must be logged with timestamps, model ID, and checksum for auditing and reproducibility.
 - Enforce the same guardrails and configuration limits as live trading. Failures should be recorded, halt order simulation for that step, and preserve the prior virtual position state.
