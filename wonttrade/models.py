@@ -108,6 +108,7 @@ class PositionSnapshot:
     side: PositionSide
     confidence: float | None = None
     protection: ProtectionPlan = field(default_factory=lambda: ProtectionPlan(None, None))
+    margin: float | None = None
 
 
 @dataclass(slots=True)
@@ -127,10 +128,39 @@ class TargetPosition:
 
     symbol: str
     target_size: float
-    stop_loss: float | None
-    take_profit: float | None
+    stop_loss: float
+    take_profit: float
     confidence: float
-    rationale: str | None = None
+    rationale: str
+    margin: float | None = None
+
+    def to_dict(self) -> dict[str, float | str | None]:
+        return {
+            "symbol": self.symbol,
+            "target_size": self.target_size,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+            "margin": self.margin,
+        }
+
+    def to_chinese_summary(self) -> str:
+        margin_text = f"，预计保证金 {self.margin:.2f}" if self.margin is not None else ""
+        return (
+            f"{self.symbol} 目标仓位 {self.target_size}，止损 {self.stop_loss}，"
+            f"止盈 {self.take_profit}，信心水平 {self.confidence}{margin_text}。"
+            f"理由：{self.rationale}"
+        )
+
+
+@dataclass(slots=True)
+class DecisionResult:
+    """LLM decision payload including explanation and targets."""
+
+    explanation: str
+    invalidation_condition: str
+    targets: list[TargetPosition]
 
 
 class ActionType(str, Enum):

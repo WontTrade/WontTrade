@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from hyperliquid.info import Info
 
@@ -13,7 +14,12 @@ from ..core.indicator_engine import IndicatorEngine
 from ..core.state_loader import MarketStateBundle
 from ..models import MarketSnapshot, RawSymbolWindow
 from ..telemetry.logger import get_logger
-from .historical import LOOKBACK_3M, LOOKBACK_4H, HyperliquidHistoricalFetcher
+from .historical import (
+    LOOKBACK_3M,
+    LOOKBACK_4H,
+    HyperliquidHistoricalFetcher,
+    SymbolHistory,
+)
 from .simulation import SimulatedExchange
 
 
@@ -25,6 +31,11 @@ class BacktestReplayProvider:
     simulation: SimulatedExchange
     info_client: Info
     indicator_engine: IndicatorEngine | None = None
+    _indicator_engine: IndicatorEngine = field(init=False, repr=False)
+    _log: Any = field(init=False, repr=False)
+    _history: dict[str, SymbolHistory] = field(init=False, repr=False)
+    _timeline: list[datetime] = field(init=False, repr=False)
+    _step: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.config.backtest is None:
@@ -54,8 +65,8 @@ class BacktestReplayProvider:
         try:
             self.info_client.session.close()
         except Exception as exc:  # pragma: no cover - best effort cleanup
-            self._log.debug("Failed to close Hyperliquid session: %s", exc)
-        self._log.debug("BacktestReplayProvider closed.")
+            self._log.debug("关闭 Hyperliquid 会话失败：%s", exc)
+        self._log.debug("回测回放提供器已关闭。")
 
     def load(
         self,

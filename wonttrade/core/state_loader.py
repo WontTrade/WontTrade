@@ -49,7 +49,7 @@ class StateLoader:
         try:
             self._info.disconnect_websocket()
         except Exception as exc:  # pragma: no cover - best effort cleanup
-            self._log.debug("Failed to disconnect Hyperliquid websocket: %s", exc)
+            self._log.debug("断开 Hyperliquid WebSocket 失败：%s", exc)
 
     def load(
         self, *, invocation: int, uptime_minutes: float, sharpe_ratio: float
@@ -63,7 +63,7 @@ class StateLoader:
                 enriched = self._build_symbol_data(window)
                 market_symbols[window.symbol] = enriched
             except Exception as exc:
-                self._log.exception("Failed to build indicators for %s", window.symbol)
+                self._log.exception("计算 %s 指标失败", window.symbol)
                 raise RuntimeError(f"Indicator enrichment failed for {window.symbol}") from exc
 
         market_snapshot = MarketSnapshot(
@@ -140,8 +140,11 @@ class StateLoader:
         state = self._info.user_state(self._config.account_address)
         positions = [self._convert_position(entry) for entry in state.get("assetPositions", [])]
         margin_summary = state.get("marginSummary", {})
-        available_cash = float(state.get("withdrawable", 0.0))
-        account_value = float(margin_summary.get("accountValue", 0.0))
+        free_collateral = margin_summary.get("freeCollateral")
+        available_cash = float(
+            free_collateral if free_collateral is not None else state.get("withdrawable", 0.0)
+        )
+        account_value = float(margin_summary.get("accountValue", state.get("equity", 0.0)))
         total_return_percent = 0.0  # Placeholder until performance tracking is wired
         return AccountSnapshot(
             captured_at=now,
@@ -168,6 +171,8 @@ class StateLoader:
         liquidation_price = float(liquidation_raw) if liquidation_raw not in (None, "") else None
         entry_px_raw = position.get("entryPx")
         unrealized_raw = position.get("unrealizedPnl")
+        margin_raw = position.get("marginUsed")
+        margin_value = float(margin_raw) if margin_raw not in (None, "") else None
 
         return PositionSnapshot(
             symbol=str(position.get("coin", "")),
@@ -179,4 +184,5 @@ class StateLoader:
             leverage=leverage_value,
             side=PositionSide.LONG if quantity >= 0 else PositionSide.SHORT,
             protection=ProtectionPlan(stop_loss=None, take_profit=None),
+            margin=margin_value,
         )
