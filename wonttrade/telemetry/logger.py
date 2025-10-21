@@ -10,6 +10,7 @@ import logfire
 _LOGGER_INITIALIZED = False
 _LOCK = threading.Lock()
 
+_DEFAULT_LOGGER = logfire.DEFAULT_LOGFIRE_INSTANCE.with_tags("wonttrade")
 
 class _SupportsLog(Protocol):
     def debug(self, message: str, *args: Any, **values: Any) -> None: ...
@@ -26,10 +27,11 @@ class _SupportsLog(Protocol):
 class LogfireLogger(_SupportsLog):
     """Adapter that mimics the standard logging interface."""
 
-    __slots__ = ("_name",)
+    __slots__ = ("_logger",)
 
     def __init__(self, name: str | None) -> None:
-        self._name = name or "wonttrade"
+        logger_name = name or "wonttrade"
+        self._logger = _DEFAULT_LOGGER.with_tags(logger_name)
 
     def debug(self, message: str, *args: Any, **values: Any) -> None:
         self._emit("debug", message, args, values)
@@ -50,21 +52,11 @@ class LogfireLogger(_SupportsLog):
         formatted = _format(message, args)
         attributes = dict(values)
         exc_info = attributes.pop("exc_info", None)
-        attributes.setdefault("logger_name", self._name)
-        log_func = _LOGFIRE_METHODS[level]
+        log_method = getattr(self._logger, level)
         if exc_info is None:
-            log_func(formatted, **attributes)
+            log_method(formatted, **attributes)
         else:
-            log_func(formatted, _exc_info=exc_info, **attributes)
-
-
-_LOGFIRE_METHODS: dict[str, Any] = {
-    "debug": logfire.debug,
-    "info": logfire.info,
-    "warning": logfire.warning,
-    "error": logfire.error,
-    "exception": logfire.exception,
-}
+            log_method(formatted, _exc_info=exc_info, **attributes)
 
 
 def _format(message: str, args: tuple[Any, ...]) -> str:
@@ -88,6 +80,7 @@ def _configure_logging() -> None:
             service="wonttrade",
             send_to_logfire=False,
         )
+        logfire.instrument_pydantic_ai(include_content=True)
         _LOGGER_INITIALIZED = True
 
 
