@@ -36,7 +36,7 @@ class RuntimeMode(str, Enum):
 
 @dataclass(slots=True)
 class RiskLimits:
-    """Risk guardrails enforced before executing trades."""
+    """Risk configuration hints available to the strategy."""
 
     max_leverage: float = 10.0
     max_notional_per_symbol: float = 50_000.0
@@ -66,6 +66,7 @@ class LLMSettings:
 
     provider: LLMProvider = LLMProvider.OPENAI
     model: str = "gpt-4.1"
+    endpoint: str | None = None
     temperature: float = 0.1
     max_output_tokens: int = 1_000
     request_timeout_seconds: float = 30.0
@@ -181,6 +182,7 @@ class AppConfig:
             llm_section.get("request_timeout_seconds", 30.0) if llm_section else 30.0
         )
         retry_attempts_value = int(llm_section.get("retry_attempts", 3) if llm_section else 3)
+        endpoint_value = _optional_string(llm_section, "endpoint")
 
         api_key = None
         azure_settings: AzureOpenAISettings | None = None
@@ -208,6 +210,7 @@ class AppConfig:
         llm_settings = LLMSettings(
             provider=provider,
             model=model_value or "",
+            endpoint=endpoint_value,
             temperature=temperature_value,
             max_output_tokens=max_output_tokens_value,
             request_timeout_seconds=timeout_value,

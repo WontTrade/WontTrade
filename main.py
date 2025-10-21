@@ -12,7 +12,6 @@ from wonttrade.backtest.simulation import SimulatedExchange, SimulatedExecutor
 from wonttrade.config import AppConfig, RuntimeMode
 from wonttrade.context import LLMContextBuilder
 from wonttrade.core.execution import ExecutionService
-from wonttrade.core.guardrails import GuardrailService
 from wonttrade.core.reconciler import PositionReconciler
 from wonttrade.core.state_loader import StateLoader
 from wonttrade.hyperliquid_client import HyperliquidClientFactory
@@ -43,7 +42,6 @@ def main() -> None:
         config=config,
         context_builder=LLMContextBuilder(),
     )
-    guardrails = GuardrailService(config)
     reconciler = PositionReconciler()
     audit_sink = AuditSink(
         decision_log_path=config.telemetry.decision_log_path,
@@ -58,6 +56,7 @@ def main() -> None:
             fee_bps=config.backtest.fee_bps,
             slippage_bps=config.backtest.slippage_bps,
             results_path=config.backtest.results_path,
+            initial_leverage=config.risk.max_leverage if config.risk.max_leverage > 0 else 10.0,
         )
         info_client = Info(base_url=config.hyperliquid_base_url, skip_ws=True)
         state_loader = BacktestReplayProvider(
@@ -70,7 +69,6 @@ def main() -> None:
             config=config,
             state_loader=state_loader,
             decision_engine=decision_engine,
-            guardrails=guardrails,
             reconciler=reconciler,
             executor=executor,
             audit_sink=audit_sink,
@@ -87,7 +85,6 @@ def main() -> None:
             config=config,
             state_loader=state_loader,
             decision_engine=decision_engine,
-            guardrails=guardrails,
             reconciler=reconciler,
             executor=executor,
             audit_sink=audit_sink,

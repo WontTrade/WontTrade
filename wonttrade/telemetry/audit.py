@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ class AuditSink:
 
     decision_log_path: Path
     heartbeat_path: Path
+    _log: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._log = get_logger(__name__)
@@ -51,4 +52,4 @@ class AuditSink:
                 handle.write(json.dumps(payload))
                 handle.write("\n")
         except Exception as exc:
-            self._log.error("Failed to write telemetry to %s: %s", path, exc)
+            self._log.error("写入遥测文件 %s 失败：%s", path, exc)

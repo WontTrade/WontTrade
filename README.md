@@ -1,6 +1,6 @@
 # WontTrade
 
-Autonomous trading daemon that ingests Hyperliquid market data, prompts a large language model for target positions, applies guardrails, and reconciles execution via the official Hyperliquid Python SDK.
+Autonomous trading daemon that ingests Hyperliquid market data, prompts a large language model for target positions (including mandatory stop-loss/stop-gain and invalidation conditions), and reconciles execution via the official Hyperliquid Python SDK.
 
 ## Prerequisites
 
@@ -16,8 +16,8 @@ WontTrade is configured exclusively through a TOML file (defaults to `wonttrade.
 - `[runtime]` – Trading mode (`live` or `backtest`) and loop cadence.
 - `[hyperliquid]` – Target network (`mainnet`, `testnet`, `local`) and optional base URL override.
 - `[symbols]` – Asset universe tracked by the trading loop.
-- `[llm]` – Model selection plus OpenAI or Azure-specific settings (`[llm.azure]`).
-- `[risk]` – Leverage, notional, and funding guardrails.
+- `[llm]` – Model selection, optional custom endpoint for OpenAI-compatible servers, and Azure-specific settings (`[llm.azure]`). The model **must** return stop-loss、take-profit 和无效条件；未提供会导致决策失败并重试。
+- `[risk]` – Optional leverage, notional, and funding hints available to downstream components.
 - `[telemetry]` – Paths for decision logs and heartbeat output.
 - `[backtest]` – Window, cash, and execution parameters for historical simulations.
 
@@ -37,7 +37,7 @@ uv sync
 uv run python main.py --config wonttrade.toml
 ```
 
-The loop connects to Hyperliquid using the official SDK, requests decisions from the configured LLM provider, enforces guardrails, and reconciles target positions.
+The loop connects to Hyperliquid using the official SDK,请求 LLM 输出中文解释、无效条件与完整保护位，并据此调仓；若模型判定上一轮分析仍然有效，则应维持原仓位。
 
 ### Backtesting
 
@@ -58,7 +58,7 @@ uv run ruff format
 
 - `wonttrade/config.py` – TOML-backed configuration models.
 - `wonttrade/loop.py` – Core orchestration for live and backtest loops.
-- `wonttrade/core/` – Guardrails, reconciliation, execution, and state utilities.
+- `wonttrade/core/` – Reconciliation, execution, and state utilities.
 - `wonttrade/backtest/` – Historical data fetch, replay, and simulation plumbing.
 - `wonttrade/llm/decision_engine.py` – Prompt construction and response parsing for OpenAI/Azure.
 - `wonttrade/hyperliquid_client.py` – Factory for live Hyperliquid Info and Exchange clients.

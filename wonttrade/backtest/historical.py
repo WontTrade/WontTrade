@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from hyperliquid.info import Info
@@ -37,6 +37,9 @@ class SymbolHistory:
     candles_3m: list[Candle]
     candles_4h: list[Candle]
     funding: list[FundingPoint]
+    _timestamps_3m: list[datetime] = field(init=False, repr=False)
+    _timestamps_4h: list[datetime] = field(init=False, repr=False)
+    _funding_times: list[datetime] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._timestamps_3m = [candle.timestamp for candle in self.candles_3m]

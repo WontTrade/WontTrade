@@ -5,7 +5,7 @@
 - Operate on Hyperliquid perpetual markets (BTC and ETH are primary) using the official Hyperliquid Python SDK, with first-class support for both mainnet and testnet clusters.
 - Produce absolute target positions on each invocation; avoid sequencing instructions.
 - Survive unexpected interruptions by reconciling state on restart without manual input.
-- Delegate portfolio decisions to an OpenAI-hosted large language model while enforcing guardrails for risk and compliance.
+- Delegate portfolio decisions to an OpenAI-hosted large language model; the engine applies the targets directly without post-processing risk filters. The model must always supply stop-loss, take-profit, and an explicit invalidation condition for the overall plan.
 - Never trigger full liquidation on the user's behalf; the engine only aligns to model targets within validated constraints.
 - Enforce formatting and linting through Ruff to maintain consistent code quality.
 
@@ -18,16 +18,15 @@
 ## 3. Architecture Overview
 ```
 bootstrap → event loop:
-  loadSnapshot → enrichIndicators → buildLLMContext → callLLM
-  → guardrailFilter → reconcilePositions → executeOrders → emitReports
+  loadSnapshot → enrichIndicators → buildLLMContext (includes prior decision)
+  → callLLM (evaluate prior plan) → reconcilePositions → executeOrders → emitReports
 ```
 
 ### 3.1 Module Responsibilities
 - `StateLoader`: Collect fresh market data (price, funding, OI, OHLCV) and account state (balances, positions, open orders) through the Hyperliquid SDK.
 - `IndicatorEngine`: Calculate rolling EMA, MACD, RSI, ATR and other signals directly on the in-memory window required for prompting.
 - `ContextBuilder`: Assemble a chronological prompt payload containing market snapshots, account posture, and metadata (Sharpe, uptime, invocation count).
-- `LLMDecisionEngine`: Invoke OpenAI's Python SDK with deterministic temperature settings and strict response schema hints.
-- `GuardrailService`: Validate model output against leverage caps, exposure, funding thresholds, and schema compliance. On failure, freeze existing positions instead of forcing liquidation.
+- `LLMDecisionEngine`: Invoke OpenAI's Python SDK with deterministic temperature settings and strict response schema hints. Enforces presence of stop-loss / take-profit per symbol and a top-level invalidation condition.
 - `PositionReconciler`: Compare current positions with the target portfolio to derive delta orders, ensuring idempotency and protection order alignment.
 - `ExecutionService`: Submit create/cancel/modify requests through the Hyperliquid SDK, manage idempotency keys, and surface execution results.
 - `AuditSink`: Persist structured logs, decision traces, and metrics for observability and post-mortem analysis.
@@ -52,58 +51,51 @@ All interfaces are Python dataclasses (or TypedDicts) shared across modules to a
 4. **Decision Inference**  
    - OpenAI Python SDK call with streaming disabled, bounded latency, and automatic retries on transient faults.  
    - Expected response: JSON array of `TargetPosition`; reject free-form prose.
-5. **Guardrails**  
-   - Schema validation, leverage checks, concentration limits, funding-rate ceilings.  
-   - If any rule fails, emit an alert and carry over current positions unchanged.
-6. **Reconciliation and Execution**  
+5. **Decision Evaluation**  
+   - Provide the previous explanation/condition to the LLM; if invalidation triggers, adjust targets, otherwise keep positions constant.  
+   - Require every target to contain stop-loss、take-profit、confidence、rationale，并返回整体无效条件。  
+6. **Plan Synthesis and Execution**  
    - Calculate per-symbol deltas (buy/sell quantity, stop, take-profit adjustments).  
    - Submit orders using the Hyperliquid SDK with deterministic client order IDs for idempotency.  
    - Ensure missing protective orders are added when the target includes them; absence of targets leaves existing protection untouched.
 7. **Reporting**  
-   - Append execution outcomes, model confidences, and guardrail flags to `decision-log.ndjson`.  
+   - Append execution outcomes and model confidences to `decision-log.ndjson`.  
    - Update heartbeat file (timestamp, status, error codes) for external watchdogs.
 
-## 6. Guardrail Design
-- **Schema Enforcement**: JSON decode with strict typing; reject unknown symbols or missing fields.  
-- **Risk Limits**: Max notional per symbol, max net leverage, cash buffer requirements.  
-- **Funding Awareness**: Reject increases when funding exceeds configured absolute limits unless confidence crosses a high threshold.  
-- **Order Safety**: Validate stop-loss / take-profit relative to current price to prevent inverted protection.  
-- **Graceful Failure**: When guardrails trigger, signal the anomaly, skip execution, and do not close positions automatically.
-
-## 7. LLM Integration
+## 6. LLM Integration
 - Support both OpenAI and Azure OpenAI providers through the official Python SDKs; provider selection, credentials, and deployment metadata are defined in `wonttrade.toml`.  
 - Maintain versioned prompt templates stored on disk; the loop reads but never mutates them.  
-- Log raw prompt and response for replay while redacting secrets.  
+- Enforce JSON responses containing `explanation`, `invalidation_condition`, and a `targets` array where each entry specifies `symbol`, `target_size`, `stop_loss`, `take_profit`, `confidence`, `rationale`, and optional `margin`.  
+- Log raw prompt and response for replay while redacting secrets, including the validation of prior decisions.  
 - Provide optional temperature tuning and max token controls through static configuration.
 
-## 8. Configuration and Secrets
+## 7. Configuration and Secrets
 - All runtime inputs (credentials, symbols, risk limits, runtime mode, telemetry paths) are sourced from an immutable TOML file (default `wonttrade.toml`). The daemon rejects missing or malformed fields rather than falling back to environment variables.  
 - LLM credentials support OpenAI (`credentials.openai_api_key`) or Azure OpenAI (`credentials.azure_openai_api_key`) along with provider metadata (`llm.provider`, optional `[llm.azure]` table).
 - Secrets load once at bootstrap; no hot reloading.  
 - Optionally support configuration hashing to detect accidental edits at startup.
 - Ruff enforces lint/format during CI and local development; integrate with task runners invoked through `uv`.
 
-## 9. Observability and Resilience
+## 8. Observability and Resilience
 - Structured logs (JSON Lines) tagged by `market`, `decision`, `execution`, `risk`, `health`.  
-- Metrics output compatible with Prometheus text exposition (latency, guardrail hits, execution success rates).  
+- Metrics output compatible with Prometheus text exposition (latency, execution success rates).  
 - Heartbeat artifact updated every loop with last success timestamp and summary status.  
 - Automatic retries with exponential backoff for Hyperliquid SDK operations; after configurable consecutive failures, pause new LLM calls but leave positions untouched.
 
-## 10. Restart and Recovery Behavior
+## 9. Restart and Recovery Behavior
 - At startup the engine immediately fetches `AccountSnapshot` and reconstructs the live posture before any LLM call.  
 - Since decisions are absolute targets, the first reconciliation after a crash aligns actual holdings with the latest LLM recommendation.  
 - Pending protective orders are re-synced: missing stop/take-profit orders are reinstated based on stored metadata or latest model output.
 
-## 11. Future Extensions
+## 10. Future Extensions
 - Expand prompt context with additional markets or macro indicators.  
 - Introduce automated scenario testing that replays historical `MarketSnapshot` data through the same loop.  
 - Add optional human-in-the-loop approval mode without breaking the zero-interaction baseline.  
-- Support multiple concurrent LLM models with weighted blending once validated by guardrails.
+- Support multiple concurrent LLM models with weighted blending after sufficient evaluation.
 
-## 12. Backtesting Support
-- Reuse the production event loop with a configurable `RuntimeMode` flag (`LIVE`, `TESTNET`, `BACKTEST`) so guardrails, reconciliation, and telemetry behave identically across modes.
+## 11. Backtesting Support
+- Reuse the production event loop with a configurable `RuntimeMode` flag (`LIVE`, `TESTNET`, `BACKTEST`) so reconciliation and telemetry behave identically across modes.
 - Provide a `BacktestReplayProvider` that streams Hyperliquid historical candles and funding (via the Info API) into `MarketSnapshot` objects, computing required indicators on the fly to match the real-time feature set.
 - Replace live execution with a `SimulatedExecutor` that consumes `ExecutionPlan` actions, applies configurable slippage and fee models, maintains virtual balances, and emits `AccountSnapshot` updates for the next loop iteration.
 - Always invoke the OpenAI LLM in real time during backtests; caching is forbidden. Each prompt/response pair must be logged with timestamps, model ID, and checksum for auditing and reproducibility.
-- Enforce the same guardrails and configuration limits as live trading. Failures should be recorded, halt order simulation for that step, and preserve the prior virtual position state.
-- Emit dedicated artifacts at the end of a backtest (equity curve, drawdown series, guardrail hit counts, latency metrics) while keeping per-iteration traces in `backtest-results.ndjson` for downstream analytics.
+- Emit dedicated artifacts at the end of a backtest (equity curve, drawdown series, latency metrics) while keeping per-iteration traces in `backtest-results.ndjson` for downstream analytics. Track whether the LLM reused or replaced the prior decision for later analysis.

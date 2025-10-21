@@ -6,7 +6,14 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .models import AccountSnapshot, MarketSnapshot, PositionSnapshot, SymbolMarketData
+from .models import (
+    AccountSnapshot,
+    DecisionResult,
+    MarketSnapshot,
+    PositionSnapshot,
+    SymbolMarketData,
+    TargetPosition,
+)
 
 
 def _format_series(series: Iterable[float]) -> str:
@@ -23,6 +30,7 @@ def _format_position(position: PositionSnapshot) -> str:
         "unrealized_pnl": position.unrealized_pnl,
         "leverage": position.leverage,
         "confidence": position.confidence,
+        "margin": position.margin,
     }
     return json.dumps(payload, separators=(", ", ": "))
 
@@ -31,7 +39,13 @@ def _format_position(position: PositionSnapshot) -> str:
 class LLMContextBuilder:
     """Render market and account state into a deterministic prompt."""
 
-    def build(self, market: MarketSnapshot, account: AccountSnapshot) -> str:
+    def build(
+        self,
+        market: MarketSnapshot,
+        account: AccountSnapshot,
+        *,
+        previous_decision: DecisionResult | None = None,
+    ) -> str:
         lines: list[str] = []
         lines.append(f"It has been {int(market.uptime_minutes)} minutes since you started trading.")
         lines.append(
@@ -47,6 +61,17 @@ class LLMContextBuilder:
         lines.append("")
         lines.append("ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST")
         lines.append("")
+        if previous_decision is not None:
+            lines.append("PREVIOUS DECISION SUMMARY")
+            lines.append(f"Explanation: {previous_decision.explanation}")
+            lines.append(f"Invalidation Condition: {previous_decision.invalidation_condition}")
+            lines.append("Prior targets (evaluate before changing anything):")
+            for target in previous_decision.targets:
+                lines.extend(
+                    self._format_previous_target(target, market.symbols.get(target.symbol))
+                )
+            lines.append("")
+
         lines.append("CURRENT MARKET STATE FOR ALL COINS")
 
         for symbol, data in market.symbols.items():
@@ -105,3 +130,36 @@ class LLMContextBuilder:
             f"ATR (short vs. long): {(data.atr_short or 0.0):.6f} vs. {(data.atr_long or 0.0):.6f}"
         )
         return "\n".join(block)
+
+    def _format_previous_target(
+        self,
+        target: TargetPosition,
+        market_data: SymbolMarketData | None,
+    ) -> list[str]:
+        summary = (
+            f"- {target.symbol}: target_size {target.target_size}, "
+            f"stop_loss {target.stop_loss}, take_profit {target.take_profit}, "
+            f"confidence {target.confidence}, rationale {target.rationale}"
+        )
+        lines = [summary]
+        if market_data is not None:
+            price = market_data.current_price
+            stop_triggered = False
+            take_hit = False
+            if target.target_size >= 0:
+                if price <= target.stop_loss:
+                    stop_triggered = True
+                if price >= target.take_profit:
+                    take_hit = True
+            else:
+                if price >= target.stop_loss:
+                    stop_triggered = True
+                if price <= target.take_profit:
+                    take_hit = True
+            lines.append(
+                f"  Current price {price:.6f}; stop_loss_triggered={str(stop_triggered).lower()}; "
+                f"take_profit_triggered={str(take_hit).lower()}"
+            )
+        if target.margin is not None:
+            lines.append(f"  Recorded margin usage: {target.margin:.6f}")
+        return lines

@@ -32,6 +32,7 @@ class SimulatedPosition:
     quantity: float
     avg_entry_price: float
     protection: ProtectionPlan = field(default_factory=lambda: ProtectionPlan(None, None))
+    margin: float = 0.0
 
 
 class SimulatedExchange:
@@ -44,6 +45,7 @@ class SimulatedExchange:
         fee_bps: float,
         slippage_bps: float,
         results_path: Path,
+        initial_leverage: float = 10.0,
     ):
         self._cash = initial_cash
         self._initial_cash = initial_cash
@@ -56,6 +58,9 @@ class SimulatedExchange:
         self._results_path.parent.mkdir(parents=True, exist_ok=True)
         self._forced_fills: list[FillRecord] = []
         self._log = get_logger(__name__)
+        leverage = initial_leverage if initial_leverage > 0 else 10.0
+        self._margin_ratio = 1.0 / leverage
+        self._margin_used = 0.0
 
     def ingest_prices(self, market: MarketSnapshot) -> None:
         """Update mark prices using the latest market snapshot."""
@@ -125,11 +130,13 @@ class SimulatedExchange:
     def snapshot_account(self, *, as_of: datetime) -> AccountSnapshot:
         """Return the current account snapshot."""
         positions: list[PositionSnapshot] = []
-        equity = self._cash
+        equity = self._cash + self._margin_used
         for symbol, position in self._positions.items():
             mark = self._marks.get(symbol, position.avg_entry_price)
             unrealized = (mark - position.avg_entry_price) * position.quantity
-            equity += mark * position.quantity
+            equity += unrealized
+            notional = abs(position.quantity) * mark
+            leverage = notional / position.margin if position.margin > EPSILON else 0.0
             positions.append(
                 PositionSnapshot(
                     symbol=symbol,
@@ -138,9 +145,10 @@ class SimulatedExchange:
                     current_price=mark,
                     liquidation_price=None,
                     unrealized_pnl=unrealized,
-                    leverage=0.0,
+                    leverage=leverage,
                     side=PositionSide.LONG if position.quantity >= 0 else PositionSide.SHORT,
                     protection=position.protection,
+                    margin=position.margin,
                 )
             )
         total_return = 0.0
@@ -171,7 +179,7 @@ class SimulatedExchange:
                 fills.extend(self._apply_action(action, market))
             except Exception as exc:  # pragma: no cover - deterministic execution expected
                 errors.append(ExecutionError(symbol=action.symbol, message=str(exc)))
-                self._log.error("Simulation failed for %s: %s", action.symbol, exc)
+                self._log.error("模拟执行 %s 时发生异常：%s", action.symbol, exc)
         return fills, errors
 
     def _apply_action(self, action: ExecutionAction, market: MarketSnapshot) -> list[FillRecord]:
@@ -203,6 +211,7 @@ class SimulatedExchange:
                     data.current_price,
                     "manual:close",
                     timestamp,
+                    apply_slippage=True,
                 )
             ]
         if action.action is ActionType.UPSIZE:
@@ -307,7 +316,7 @@ class SimulatedExchange:
             fill_price = mark_price
         total_value = fill_price * quantity
         total_fee = total_value * self._fee_rate
-        self._cash -= total_value + total_fee
+        self._cash -= total_fee
 
         position = self._positions.get(symbol)
         fills: list[FillRecord] = []
@@ -317,7 +326,17 @@ class SimulatedExchange:
             closing = min(remaining, abs(position.quantity))
             if closing > 0:
                 realized = (position.avg_entry_price - fill_price) * closing
+                current_exposure = abs(position.quantity)
+                margin_release = 0.0
+                if position.margin > 0 and current_exposure > 0:
+                    margin_release = position.margin * (closing / current_exposure)
+                    position.margin -= margin_release
+                    if position.margin < 0:
+                        position.margin = 0.0
+                    self._margin_used -= margin_release
+                    self._cash += margin_release
                 position.quantity += closing
+                self._cash += realized
                 self._realized_pnl += realized
                 allocated_fee = total_fee * (closing / quantity)
                 fills.append(
@@ -336,17 +355,27 @@ class SimulatedExchange:
                 )
                 remaining -= closing
                 if abs(position.quantity) <= EPSILON:
+                    if position.margin > 0:
+                        self._cash += position.margin
+                        self._margin_used -= position.margin
+                        position.margin = 0.0
+                        if self._margin_used < 0:
+                            self._margin_used = 0.0
                     del self._positions[symbol]
                     position = None
 
         if remaining > 0:
             allocated_fee = total_fee * (remaining / quantity)
+            margin_required = fill_price * remaining * self._margin_ratio
+            self._cash -= margin_required
+            self._margin_used += margin_required
             if position is None:
                 position = SimulatedPosition(
                     symbol=symbol,
                     quantity=remaining,
                     avg_entry_price=fill_price,
                     protection=self._build_protection(stop_loss, take_profit),
+                    margin=margin_required,
                 )
                 self._positions[symbol] = position
             else:
@@ -360,6 +389,7 @@ class SimulatedExchange:
                     stop_loss,
                     take_profit,
                 )
+                position.margin += margin_required
             fills.append(
                 self._log_fill(
                     timestamp,
@@ -396,7 +426,7 @@ class SimulatedExchange:
             fill_price = mark_price
         total_value = fill_price * quantity
         total_fee = total_value * self._fee_rate
-        self._cash += total_value - total_fee
+        self._cash -= total_fee
 
         position = self._positions.get(symbol)
         fills: list[FillRecord] = []
@@ -406,8 +436,17 @@ class SimulatedExchange:
             closing = min(remaining, position.quantity)
             if closing > 0:
                 realized = (fill_price - position.avg_entry_price) * closing
+                margin_release = 0.0
+                if position.margin > 0 and position.quantity > 0:
+                    margin_release = position.margin * (closing / position.quantity)
+                    position.margin -= margin_release
+                    if position.margin < 0:
+                        position.margin = 0.0
+                    self._margin_used -= margin_release
+                    self._cash += margin_release
                 position.quantity -= closing
                 self._realized_pnl += realized
+                self._cash += realized
                 allocated_fee = total_fee * (closing / quantity)
                 fills.append(
                     self._log_fill(
@@ -425,17 +464,27 @@ class SimulatedExchange:
                 )
                 remaining -= closing
                 if position.quantity <= EPSILON:
+                    if position.margin > 0:
+                        self._cash += position.margin
+                        self._margin_used -= position.margin
+                        position.margin = 0.0
+                        if self._margin_used < 0:
+                            self._margin_used = 0.0
                     del self._positions[symbol]
                     position = None
 
         if remaining > 0:
             allocated_fee = total_fee * (remaining / quantity)
+            margin_required = fill_price * remaining * self._margin_ratio
+            self._cash -= margin_required
+            self._margin_used += margin_required
             if position is None:
                 position = SimulatedPosition(
                     symbol=symbol,
                     quantity=-remaining,
                     avg_entry_price=fill_price,
                     protection=self._build_protection(stop_loss, take_profit),
+                    margin=margin_required,
                 )
                 self._positions[symbol] = position
             else:
@@ -449,6 +498,7 @@ class SimulatedExchange:
                     stop_loss,
                     take_profit,
                 )
+                position.margin += margin_required
             fills.append(
                 self._log_fill(
                     timestamp,
@@ -504,7 +554,7 @@ class SimulatedExchange:
                 handle.write(json.dumps(record))
                 handle.write("\n")
         except Exception as exc:  # pragma: no cover - telemetry best effort
-            self._log.error("Failed to write backtest result: %s", exc)
+            self._log.error("写入回测结果文件失败：%s", exc)
         return fill
 
 

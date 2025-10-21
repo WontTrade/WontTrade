@@ -40,7 +40,7 @@ class ExecutionService:
 
     def execute(self, plan: ExecutionPlan, market: MarketSnapshot | None = None) -> ExecutionReport:
         if plan.is_noop():
-            self._log.info("No execution required; plan is empty.")
+            self._log.info("本轮无需执行，计划为空。")
             return ExecutionReport(attempted=0, errors=[], fills=[])
 
         errors: list[ExecutionError] = []
@@ -48,7 +48,7 @@ class ExecutionService:
             try:
                 self._dispatch_stub(action)
             except Exception as exc:  # pragma: no cover - surface runtime issues
-                self._log.error("Execution failed for %s: %s", action.symbol, exc)
+                self._log.error("执行 %s 时失败：%s", action.symbol, exc)
                 errors.append(ExecutionError(symbol=action.symbol, message=str(exc)))
         return ExecutionReport(attempted=len(plan.actions), errors=errors, fills=[])
 
@@ -56,27 +56,27 @@ class ExecutionService:
         """Placeholder dispatcher until full execution logic is implemented."""
         if action.action == ActionType.UPSIZE:
             self._log.info(
-                "Would upsize %s by %.6f contracts towards target %.6f.",
+                "计划加仓 %s，增量 %.6f，目标仓位 %.6f。",
                 action.symbol,
                 action.quantity_delta,
                 action.target_size,
             )
         elif action.action == ActionType.DOWNSIZE:
             self._log.info(
-                "Would downsize %s by %.6f contracts towards target %.6f.",
+                "计划减仓 %s，减量 %.6f，目标仓位 %.6f。",
                 action.symbol,
                 action.quantity_delta,
                 action.target_size,
             )
         elif action.action == ActionType.CLOSE:
             self._log.info(
-                "Would close %s position size %.6f.",
+                "计划平仓 %s，数量 %.6f。",
                 action.symbol,
                 action.quantity_delta,
             )
         elif action.action == ActionType.ADJUST_PROTECTION:
             self._log.info(
-                "Would adjust protection for %s: stop=%s take=%s.",
+                "计划调整 %s 保护单：止损=%s，止盈=%s。",
                 action.symbol,
                 action.stop_loss,
                 action.take_profit,
