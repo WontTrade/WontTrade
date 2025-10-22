@@ -139,8 +139,16 @@ class LLMDecisionEngine:
                     run = self._agent.run_sync(prompt, settings=settings)
                 except TypeError:
                     run = self._agent.run_sync(prompt, model_settings=settings)
-                payload = run.data
-                raw_text = getattr(run, "output_text", "") or ""
+                payload = getattr(run, "output", None)
+                if payload is None:
+                    payload = getattr(run, "data", None)
+                raw_text = ""
+                try:
+                    response = getattr(run, "response", None)
+                except ValueError:
+                    response = None
+                if response is not None:
+                    raw_text = getattr(response, "text", None) or ""
                 if not isinstance(payload, DecisionSchema):
                     raise ValueError("LLM response failed to parse into DecisionSchema.")
                 return payload, raw_text

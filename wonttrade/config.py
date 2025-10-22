@@ -117,7 +117,7 @@ class AppConfig(BaseSettings):
     network: HyperliquidNetwork = HyperliquidNetwork.MAINNET
     hyperliquid_base_url: str = MAINNET_API_URL
     symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_SYMBOLS))
-    loop_interval_seconds: float = Field(default=15.0, gt=0)
+    loop_interval_seconds: float = Field(default=15.0, ge=0)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskLimits = Field(default_factory=RiskLimits)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
@@ -130,6 +130,16 @@ class AppConfig(BaseSettings):
         if not cleaned:
             raise ValueError("symbols must contain at least one non-empty symbol.")
         return cleaned
+
+    @model_validator(mode="after")
+    def _validate_loop_interval(self) -> AppConfig:
+        if self.runtime_mode is RuntimeMode.BACKTEST:
+            if self.loop_interval_seconds < 0:
+                raise ValueError("loop_interval_seconds must be non-negative in backtest mode.")
+        else:
+            if self.loop_interval_seconds <= 0:
+                raise ValueError("loop_interval_seconds must be greater than zero outside backtest mode.")
+        return self
 
     @classmethod
     def load(cls, path: Path | None = None) -> AppConfig:
@@ -194,7 +204,7 @@ class _Runtime(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: RuntimeMode = RuntimeMode.LIVE
-    loop_interval_seconds: float = Field(default=15.0, gt=0)
+    loop_interval_seconds: float = Field(default=15.0, ge=0)
 
 
 class _Symbols(BaseModel):

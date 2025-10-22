@@ -77,7 +77,7 @@ def _configure_logging() -> None:
         if _LOGGER_INITIALIZED:
             return
         logfire.configure(
-            service="wonttrade",
+            service_name="wonttrade",
             send_to_logfire=False,
         )
         logfire.instrument_pydantic_ai(include_content=True)
