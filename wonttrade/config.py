@@ -1,20 +1,17 @@
-"""Application configuration models."""
+"""Application configuration modeled with pydantic settings."""
 
 from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final
 
-from hyperliquid.utils.constants import (
-    LOCAL_API_URL,
-    MAINNET_API_URL,
-    TESTNET_API_URL,
-)
+from hyperliquid.utils.constants import LOCAL_API_URL, MAINNET_API_URL, TESTNET_API_URL
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SYMBOLS: Final[list[str]] = ["BTC", "ETH"]
 
@@ -34,16 +31,6 @@ class RuntimeMode(str, Enum):
     BACKTEST = "backtest"
 
 
-@dataclass(slots=True)
-class RiskLimits:
-    """Risk configuration hints available to the strategy."""
-
-    max_leverage: float = 10.0
-    max_notional_per_symbol: float = 50_000.0
-    funding_rate_limit: float = 0.0005
-    cash_buffer_usd: float = 1_000.0
-
-
 class LLMProvider(str, Enum):
     """Supported LLM providers."""
 
@@ -51,66 +38,108 @@ class LLMProvider(str, Enum):
     AZURE_OPENAI = "azure"
 
 
-@dataclass(slots=True)
-class AzureOpenAISettings:
+class RiskLimits(BaseModel):
+    """Risk configuration hints available to the strategy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_leverage: float = 10.0
+    max_notional_per_symbol: float = 50_000.0
+    funding_rate_limit: float = 0.0005
+    cash_buffer_usd: float = 1_000.0
+
+
+class AzureOpenAISettings(BaseModel):
     """Azure OpenAI specific configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     endpoint: str
     deployment: str
     api_version: str
 
 
-@dataclass(slots=True)
-class LLMSettings:
+class LLMSettings(BaseModel):
     """Settings for the LLM decision engine."""
+
+    model_config = ConfigDict(extra="forbid")
 
     provider: LLMProvider = LLMProvider.OPENAI
     model: str = "gpt-4.1"
     endpoint: str | None = None
-    temperature: float = 0.1
-    max_output_tokens: int = 1_000
-    request_timeout_seconds: float = 30.0
-    retry_attempts: int = 3
+    temperature: float = Field(default=0.1, ge=0)
+    max_output_tokens: int = Field(default=1_000, gt=0)
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+    retry_attempts: int = Field(default=3, gt=0)
     api_key: str | None = None
     azure: AzureOpenAISettings | None = None
 
 
-@dataclass(slots=True)
-class TelemetrySettings:
+class TelemetrySettings(BaseModel):
     """Telemetry output configuration."""
 
-    decision_log_path: Path = Path("decision-log.ndjson")
-    heartbeat_path: Path = Path("heartbeat.json")
+    model_config = ConfigDict(extra="forbid")
+
+    decision_log_path: Path = Field(default_factory=lambda: Path("decision-log.ndjson"))
+    heartbeat_path: Path = Field(default_factory=lambda: Path("heartbeat.json"))
 
 
-@dataclass(slots=True)
-class BacktestSettings:
+class BacktestSettings(BaseModel):
     """Configuration controlling backtest execution."""
+
+    model_config = ConfigDict(extra="forbid")
 
     start_time: datetime
     end_time: datetime
-    results_path: Path = Path("backtest-results.ndjson")
-    initial_cash: float = 10_000.0
-    fee_bps: float = 1.0
-    slippage_bps: float = 0.5
-    max_steps: int | None = None
+    results_path: Path = Field(default_factory=lambda: Path("backtest-results.ndjson"))
+    initial_cash: float = Field(default=10_000.0, gt=0)
+    fee_bps: float = Field(default=1.0, ge=0)
+    slippage_bps: float = Field(default=0.5, ge=0)
+    max_steps: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_time_range(self) -> BacktestSettings:
+        self.start_time = _ensure_utc(self.start_time)
+        self.end_time = _ensure_utc(self.end_time)
+        if self.end_time <= self.start_time:
+            raise ValueError("backtest.end_time must be greater than backtest.start_time.")
+        return self
 
 
-@dataclass(slots=True)
-class AppConfig:
-    """Top-level immutable configuration."""
+class AppConfig(BaseSettings):
+    """Top-level configuration exposed to the application."""
+
+    model_config = SettingsConfigDict(extra="forbid", env_nested_delimiter="__")
 
     wallet_private_key: str
     account_address: str
     runtime_mode: RuntimeMode = RuntimeMode.LIVE
     network: HyperliquidNetwork = HyperliquidNetwork.MAINNET
-    hyperliquid_base_url: str = "https://api.hyperliquid.xyz"
-    symbols: list[str] = field(default_factory=lambda: list(DEFAULT_SYMBOLS))
-    loop_interval_seconds: float = 15.0
-    llm: LLMSettings = field(default_factory=LLMSettings)
-    risk: RiskLimits = field(default_factory=RiskLimits)
-    telemetry: TelemetrySettings = field(default_factory=TelemetrySettings)
+    hyperliquid_base_url: str = MAINNET_API_URL
+    symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_SYMBOLS))
+    loop_interval_seconds: float = Field(default=15.0, ge=0)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    risk: RiskLimits = Field(default_factory=RiskLimits)
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     backtest: BacktestSettings | None = None
+
+    @field_validator("symbols")
+    @classmethod
+    def _normalize_symbols(cls, values: list[str]) -> list[str]:
+        cleaned = [symbol.strip() for symbol in values if symbol.strip()]
+        if not cleaned:
+            raise ValueError("symbols must contain at least one non-empty symbol.")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_loop_interval(self) -> AppConfig:
+        if self.runtime_mode is RuntimeMode.BACKTEST:
+            if self.loop_interval_seconds < 0:
+                raise ValueError("loop_interval_seconds must be non-negative in backtest mode.")
+        else:
+            if self.loop_interval_seconds <= 0:
+                raise ValueError("loop_interval_seconds must be greater than zero outside backtest mode.")
+        return self
 
     @classmethod
     def load(cls, path: Path | None = None) -> AppConfig:
@@ -120,292 +149,197 @@ class AppConfig:
         if not config_path.exists():
             raise ValueError(f"Configuration file '{config_path}' does not exist.")
 
-        with config_path.open("rb") as handle:
-            raw: dict[str, Any] = tomllib.load(handle)
+        document = _TomlConfig.from_toml(config_path)
 
-        base_dir = config_path.parent
-        credentials = _expect_table(raw, "credentials")
-        openai_key = _optional_string(credentials, "openai_api_key")
-        azure_key = _optional_string(credentials, "azure_openai_api_key")
-        hyper_private_key = _optional_string(credentials, "hyperliquid_private_key")
-        account_address_raw = _optional_string(credentials, "account_address")
+        runtime = document.runtime
+        symbols = document.symbols.tracked
+        hyperliquid = document.hyperliquid
+        credentials = document.credentials
+        llm_section = document.llm
 
-        runtime_section = _expect_table(raw, "runtime", optional=True)
-        runtime_mode_value = (
-            runtime_section.get("mode", RuntimeMode.LIVE.value)
-            if runtime_section
-            else RuntimeMode.LIVE.value
-        )
-        runtime_mode = _parse_enum(RuntimeMode, runtime_mode_value, "runtime.mode")
-        loop_interval_seconds = float(
-            runtime_section.get("loop_interval_seconds", 15.0) if runtime_section else 15.0
-        )
+        network = hyperliquid.network
+        hyperliquid_base_url = hyperliquid.base_url or {
+            HyperliquidNetwork.MAINNET: MAINNET_API_URL,
+            HyperliquidNetwork.TESTNET: TESTNET_API_URL,
+            HyperliquidNetwork.LOCAL: LOCAL_API_URL,
+        }[network]
 
-        symbols_section = _expect_table(raw, "symbols", optional=True)
-        symbols_raw = (
-            symbols_section.get("tracked", list(DEFAULT_SYMBOLS))
-            if symbols_section
-            else list(DEFAULT_SYMBOLS)
-        )
-        symbols = _parse_symbol_list(symbols_raw)
+        llm_settings = llm_section.llm_settings(credentials)
 
-        hyper_section = _expect_table(raw, "hyperliquid", optional=True)
-        network_value = (
-            hyper_section.get("network", HyperliquidNetwork.MAINNET.value)
-            if hyper_section
-            else HyperliquidNetwork.MAINNET.value
-        )
-        network = _parse_enum(HyperliquidNetwork, network_value, "hyperliquid.network")
-        base_url_override = hyper_section.get("base_url") if hyper_section else None
-        hyperliquid_base_url = (
-            base_url_override
-            or {
-                HyperliquidNetwork.MAINNET: MAINNET_API_URL,
-                HyperliquidNetwork.TESTNET: TESTNET_API_URL,
-                HyperliquidNetwork.LOCAL: LOCAL_API_URL,
-            }[network]
+        telemetry_paths = _create_telemetry(document.telemetry, config_path.parent)
+        backtest_settings = _create_backtest(runtime.mode, document.backtest, config_path.parent)
+
+        wallet_private_key, account_address = _resolve_wallet_credentials(
+            runtime.mode,
+            credentials,
         )
 
-        llm_section = _expect_table(raw, "llm", optional=True)
-        provider_value = _optional_string(
-            llm_section,
-            "provider",
-            default=LLMProvider.OPENAI.value,
+        return cls.model_validate(
+            {
+                "wallet_private_key": wallet_private_key,
+                "account_address": account_address,
+                "runtime_mode": runtime.mode,
+                "network": network,
+                "hyperliquid_base_url": hyperliquid_base_url,
+                "symbols": symbols,
+                "loop_interval_seconds": runtime.loop_interval_seconds,
+                "llm": llm_settings.model_dump(),
+                "risk": document.risk.model_dump(),
+                "telemetry": telemetry_paths.model_dump(),
+                "backtest": backtest_settings.model_dump() if backtest_settings else None,
+            }
         )
-        provider = _parse_enum(LLMProvider, provider_value, "llm.provider")
-        model_value = _optional_string(llm_section, "model", default="gpt-4.1")
-        temperature_value = float(llm_section.get("temperature", 0.1) if llm_section else 0.1)
-        max_output_tokens_value = int(
-            llm_section.get("max_output_tokens", 1_000) if llm_section else 1_000
-        )
-        timeout_value = float(
-            llm_section.get("request_timeout_seconds", 30.0) if llm_section else 30.0
-        )
-        retry_attempts_value = int(llm_section.get("retry_attempts", 3) if llm_section else 3)
-        endpoint_value = _optional_string(llm_section, "endpoint")
 
-        api_key = None
-        azure_settings: AzureOpenAISettings | None = None
-        if provider is LLMProvider.OPENAI:
-            if not openai_key:
+
+class _Credentials(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    openai_api_key: str | None = None
+    azure_openai_api_key: str | None = None
+    hyperliquid_private_key: str | None = None
+    account_address: str | None = None
+
+
+class _Runtime(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: RuntimeMode = RuntimeMode.LIVE
+    loop_interval_seconds: float = Field(default=15.0, ge=0)
+
+
+class _Symbols(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tracked: list[str] = Field(default_factory=lambda: list(DEFAULT_SYMBOLS))
+
+    @field_validator("tracked")
+    @classmethod
+    def _ensure_symbols(cls, values: list[str]) -> list[str]:
+        cleaned = [symbol.strip() for symbol in values if symbol.strip()]
+        if not cleaned:
+            raise ValueError("symbols.tracked must contain at least one symbol.")
+        return cleaned
+
+
+class _Hyperliquid(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    network: HyperliquidNetwork = HyperliquidNetwork.MAINNET
+    base_url: str | None = None
+
+
+class _Telemetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision_log_path: Path | None = None
+    heartbeat_path: Path | None = None
+
+
+class _LLMSection(LLMSettings):
+    """Extends LLMSettings with TOML-specific helpers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str | None = None  # allow override from file if ever desired
+
+    def llm_settings(self, credentials: _Credentials) -> LLMSettings:
+        api_key: str | None = None
+        if self.provider is LLMProvider.OPENAI:
+            api_key = credentials.openai_api_key or self.api_key
+            if not api_key:
                 raise ValueError("credentials.openai_api_key is required for OpenAI provider.")
-            api_key = openai_key
-            os.environ.setdefault("OPENAI_API_KEY", openai_key)
-        elif provider is LLMProvider.AZURE_OPENAI:
-            if not azure_key:
+            os.environ.setdefault("OPENAI_API_KEY", api_key)
+        elif self.provider is LLMProvider.AZURE_OPENAI:
+            api_key = credentials.azure_openai_api_key or self.api_key
+            if not api_key:
                 raise ValueError("credentials.azure_openai_api_key is required for Azure provider.")
-            if llm_section is None:
+            if self.azure is None:
                 raise ValueError("llm.azure configuration is required for Azure provider.")
-            azure_section = _expect_table(llm_section, "azure")
-            azure_settings = AzureOpenAISettings(
-                endpoint=_expect_string(azure_section, "endpoint"),
-                deployment=_expect_string(azure_section, "deployment"),
-                api_version=_expect_string(azure_section, "api_version"),
-            )
-            api_key = azure_key
-            os.environ.setdefault("AZURE_OPENAI_API_KEY", azure_key)
+            os.environ.setdefault("AZURE_OPENAI_API_KEY", api_key)
         else:
-            raise ValueError(f"Unsupported LLM provider: {provider}")
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
-        llm_settings = LLMSettings(
-            provider=provider,
-            model=model_value or "",
-            endpoint=endpoint_value,
-            temperature=temperature_value,
-            max_output_tokens=max_output_tokens_value,
-            request_timeout_seconds=timeout_value,
-            retry_attempts=retry_attempts_value,
-            api_key=api_key,
-            azure=azure_settings,
+        return self.model_copy(update={"api_key": api_key})
+
+
+class _TomlConfig(BaseModel):
+    """Representation of the raw TOML structure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credentials: _Credentials
+    runtime: _Runtime = Field(default_factory=_Runtime)
+    symbols: _Symbols = Field(default_factory=_Symbols)
+    hyperliquid: _Hyperliquid = Field(default_factory=_Hyperliquid)
+    llm: _LLMSection = Field(default_factory=_LLMSection)
+    risk: RiskLimits = Field(default_factory=RiskLimits)
+    telemetry: _Telemetry = Field(default_factory=_Telemetry)
+    backtest: BacktestSettings | None = None
+
+    @classmethod
+    def from_toml(cls, path: Path) -> _TomlConfig:
+        content = path.read_text(encoding="utf-8")
+        data: dict[str, Any] = tomllib.loads(content)
+        return cls.model_validate(data)
+
+
+def _resolve_wallet_credentials(
+    mode: RuntimeMode,
+    credentials: _Credentials,
+) -> tuple[str, str]:
+    if mode is RuntimeMode.LIVE:
+        private_key = credentials.hyperliquid_private_key
+        if not private_key:
+            raise ValueError("Live runtime requires credentials.hyperliquid_private_key.")
+        from eth_account import Account  # imported lazily to avoid hard dependency for docs/tests
+
+        account_address = credentials.account_address or Account.from_key(private_key).address
+        return private_key, account_address
+
+    # Backtest/Testnet-style: optional private key, default account name.
+    private_key = credentials.hyperliquid_private_key or ""
+    account_address = credentials.account_address or "WontTradeBacktest"
+    return private_key, account_address
+
+
+def _create_telemetry(section: _Telemetry, base_dir: Path) -> TelemetrySettings:
+    return TelemetrySettings(
+        decision_log_path=_resolve_path(base_dir, section.decision_log_path, "decision-log.ndjson"),
+        heartbeat_path=_resolve_path(base_dir, section.heartbeat_path, "heartbeat.json"),
+    )
+
+
+def _create_backtest(mode: RuntimeMode, section: BacktestSettings | None, base_dir: Path) -> BacktestSettings | None:
+    if section is None:
+        if mode is RuntimeMode.BACKTEST:
+            raise ValueError("backtest configuration section is required for backtest runtime.")
+        return None
+    if mode is not RuntimeMode.BACKTEST:
+        return section.model_copy(
+            update={
+                "results_path": _resolve_path(base_dir, section.results_path, "backtest-results.ndjson"),
+            }
         )
-
-        risk_section = _expect_table(raw, "risk", optional=True)
-        risk_limits = RiskLimits(
-            max_leverage=float(risk_section.get("max_leverage", 10.0) if risk_section else 10.0),
-            max_notional_per_symbol=float(
-                risk_section.get("max_notional_per_symbol", 50_000.0) if risk_section else 50_000.0
-            ),
-            funding_rate_limit=float(
-                risk_section.get("funding_rate_limit", 0.0005) if risk_section else 0.0005
-            ),
-            cash_buffer_usd=float(
-                risk_section.get("cash_buffer_usd", 1_000.0) if risk_section else 1_000.0
-            ),
-        )
-
-        telemetry_section = _expect_table(raw, "telemetry", optional=True)
-        telemetry_settings = TelemetrySettings(
-            decision_log_path=_resolve_path(
-                base_dir,
-                telemetry_section.get("decision_log_path") if telemetry_section else None,
-                "decision-log.ndjson",
-            ),
-            heartbeat_path=_resolve_path(
-                base_dir,
-                telemetry_section.get("heartbeat_path") if telemetry_section else None,
-                "heartbeat.json",
-            ),
-        )
-
-        if runtime_mode is RuntimeMode.LIVE:
-            if not hyper_private_key:
-                raise ValueError("Live runtime requires credentials.hyperliquid_private_key.")
-            from eth_account import Account  # local import to avoid hard dependency during docs
-
-            default_address = Account.from_key(hyper_private_key).address
-            account_address = account_address_raw or default_address
-        else:
-            account_address = account_address_raw or "WontTradeBacktest"
-            hyper_private_key = hyper_private_key or ""
-
-        backtest_settings: BacktestSettings | None = None
-        backtest_section = _expect_table(raw, "backtest", optional=True)
-        if runtime_mode is RuntimeMode.BACKTEST:
-            if backtest_section is None:
-                raise ValueError("backtest configuration section is required for backtest runtime.")
-            start_raw = _expect_string(backtest_section, "start_time")
-            end_raw = _expect_string(backtest_section, "end_time")
-            start_time = _parse_datetime(start_raw)
-            end_time = _parse_datetime(end_raw)
-            if end_time <= start_time:
-                raise ValueError("backtest.end_time must be greater than backtest.start_time.")
-            backtest_settings = BacktestSettings(
-                start_time=start_time,
-                end_time=end_time,
-                results_path=_resolve_path(
-                    base_dir,
-                    backtest_section.get("results_path"),
-                    "backtest-results.ndjson",
-                ),
-                initial_cash=float(backtest_section.get("initial_cash", 10_000.0)),
-                fee_bps=float(backtest_section.get("fee_bps", 1.0)),
-                slippage_bps=float(backtest_section.get("slippage_bps", 0.5)),
-                max_steps=_optional_int(backtest_section, "max_steps"),
-            )
-        elif (
-            backtest_section is not None
-            and "start_time" in backtest_section
-            and "end_time" in backtest_section
-        ):
-            start_time = _parse_datetime(_expect_string(backtest_section, "start_time"))
-            end_time = _parse_datetime(_expect_string(backtest_section, "end_time"))
-            if end_time <= start_time:
-                raise ValueError("backtest.end_time must be greater than backtest.start_time.")
-            backtest_settings = BacktestSettings(
-                start_time=start_time,
-                end_time=end_time,
-                results_path=_resolve_path(
-                    base_dir,
-                    backtest_section.get("results_path"),
-                    "backtest-results.ndjson",
-                ),
-                initial_cash=float(backtest_section.get("initial_cash", 10_000.0)),
-                fee_bps=float(backtest_section.get("fee_bps", 1.0)),
-                slippage_bps=float(backtest_section.get("slippage_bps", 0.5)),
-                max_steps=_optional_int(backtest_section, "max_steps"),
-            )
-
-        return cls(
-            wallet_private_key=hyper_private_key or "",
-            account_address=account_address,
-            runtime_mode=runtime_mode,
-            network=network,
-            hyperliquid_base_url=hyperliquid_base_url,
-            symbols=symbols,
-            loop_interval_seconds=loop_interval_seconds,
-            llm=llm_settings,
-            risk=risk_limits,
-            telemetry=telemetry_settings,
-            backtest=backtest_settings,
-        )
+    # Normalize paths when backtesting to ensure relative paths resolve.
+    return BacktestSettings(
+        start_time=section.start_time,
+        end_time=section.end_time,
+        results_path=_resolve_path(base_dir, section.results_path, "backtest-results.ndjson"),
+        initial_cash=section.initial_cash,
+        fee_bps=section.fee_bps,
+        slippage_bps=section.slippage_bps,
+        max_steps=section.max_steps,
+    )
 
 
-def _expect_table(
-    payload: dict[str, Any],
-    key: str,
-    *,
-    optional: bool = False,
-) -> dict[str, Any] | None:
-    value = payload.get(key)
-    if value is None:
-        if optional:
-            return None
-        raise ValueError(f"Configuration section '{key}' is required.")
-    if not isinstance(value, dict):
-        raise ValueError(f"Configuration section '{key}' must be a table.")
-    return value
-
-
-def _expect_string(payload: dict[str, Any], key: str) -> str:
-    value = payload.get(key)
-    if value is None or not isinstance(value, str) or not value.strip():
-        raise ValueError(f"Configuration key '{key}' must be a non-empty string.")
-    return value
-
-
-def _optional_string(
-    payload: dict[str, Any] | None,
-    key: str,
-    *,
-    default: str | None = None,
-) -> str | None:
-    if payload is None:
-        return default
-    value = payload.get(key)
-    if value is None:
-        return default
-    if not isinstance(value, str):
-        raise ValueError(f"Configuration key '{key}' must be a string.")
-    return value
-
-
-def _parse_enum(enum_cls: type[Enum], raw: Any, key: str) -> Enum:
-    if not isinstance(raw, str):
-        valid = ", ".join(member.value for member in enum_cls)
-        raise ValueError(f"{key} must be one of {valid}.")
-    try:
-        return enum_cls(raw.lower())
-    except Exception as exc:
-        valid = ", ".join(member.value for member in enum_cls)
-        raise ValueError(f"{key} must be one of {valid}.") from exc
-
-
-def _parse_symbol_list(raw: Any) -> list[str]:
-    if not isinstance(raw, list):
-        raise ValueError("symbols.tracked must be an array of strings.")
-    symbols: list[str] = []
-    for entry in raw:
-        if not isinstance(entry, str):
-            raise ValueError("symbols.tracked must contain strings only.")
-        trimmed = entry.strip()
-        if trimmed:
-            symbols.append(trimmed)
-    return symbols or list(DEFAULT_SYMBOLS)
-
-
-def _resolve_path(base: Path, raw: str | None, default: str) -> Path:
-    target = Path(raw) if raw else Path(default)
+def _resolve_path(base_dir: Path, candidate: Path | None, default_name: str) -> Path:
+    target = candidate or Path(default_name)
     if not target.is_absolute():
-        target = (base / target).resolve()
+        target = (base_dir / target).resolve()
     return target
 
 
-def _optional_int(payload: dict[str, Any], key: str) -> int | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip():
-        return int(value)
-    raise ValueError(f"Configuration key '{key}' must be an integer when provided.")
-
-
-def _parse_datetime(raw: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError as exc:
-        raise ValueError(f"Invalid datetime format: '{raw}'. Expected ISO 8601.") from exc
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+def _ensure_utc(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)

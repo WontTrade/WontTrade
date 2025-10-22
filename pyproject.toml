@@ -7,7 +7,10 @@ requires-python = ">=3.14"
 dependencies = [
     "hyperliquid-python-sdk>=0.20.0",
     "openai>=2.5.0",
+    "pydantic-ai>=0.1.0",
     "pydantic>=2.12.3",
+    "pydantic-settings>=2.5.2",
+    "logfire>=4.14.0",
     "tenacity>=9.1.2",
 ]
 

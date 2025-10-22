@@ -61,6 +61,14 @@ class LLMContextBuilder:
         lines.append("")
         lines.append("ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST")
         lines.append("")
+        tracked_symbols = ", ".join(market.symbols.keys())
+        lines.append(
+            "You must output a target for each tracked symbol listed here (use these exact identifiers, "
+            "provide zero size if staying flat): "
+            f"{tracked_symbols}."
+        )
+        lines.append("Do not invent new symbols or omit any symbol from the list above.")
+        lines.append("")
         if previous_decision is not None:
             lines.append("PREVIOUS DECISION SUMMARY")
             lines.append(f"Explanation: {previous_decision.explanation}")
